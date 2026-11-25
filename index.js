@@ -1064,9 +1064,8 @@ async function start() {
     version,
     auth: state,
     logger,
-    // Nama yang muncul di "Perangkat tertaut". Isi pertama bebas diganti; 'Chrome' sebaiknya
-    // dibiarkan karena pairing code butuh nama browser yang dikenal WhatsApp.
-    browser: [BOT_NAME, 'Chrome', '120.0.0'],
+    // nilai ini dipakai karena nama browser kustom sering bikin pairing code ditolak
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
     printQRInTerminal: false,
     markOnlineOnConnect: false,
     syncFullHistory: false,
