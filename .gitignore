@@ -1,0 +1,5 @@
+.env
+auth/
+rpg.json
+curhat.json
+node_modules/
