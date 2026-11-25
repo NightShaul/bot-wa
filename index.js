@@ -14,15 +14,42 @@ import readline from 'node:readline'
 import { spawn } from 'node:child_process'
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 // ================= PENGATURAN =================
 const PREFIX = '.'
-const MAX_SECONDS = 10 // durasi maksimal video jadi stiker
+const MAX_SECONDS = 20 // durasi maksimal video jadi stiker (sebelumnya 10)
 const MAX_STICKER_BYTES = 900 * 1000 // batas WA ~1MB untuk stiker animasi
+// Nomor owner tambahan (selain akun yang dipakai bot itu sendiri), format 628xxx.
+// Bisa juga lewat env: OWNER_NUMBERS=628111,628222
+const OWNER_NUMBERS = ['']
 // ==============================================
 
 const logger = pino({ level: 'silent' })
+
+// ---------- mode public / private ----------
+const SETTINGS_FILE = 'settings.json'
+function loadMode() {
+  try {
+    const m = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8')).mode
+    return m === 'public' ? 'public' : 'private'
+  } catch {
+    return 'private' // default: cuma owner
+  }
+}
+let mode = loadMode()
+const saveMode = () => writeFileSync(SETTINGS_FILE, JSON.stringify({ mode }))
+
+const ownerDigits = [...OWNER_NUMBERS, ...(process.env.OWNER_NUMBERS || '').split(',')]
+  .map((n) => n.replace(/\D/g, ''))
+  .filter(Boolean)
+
+function isOwnerMsg(m) {
+  if (m.key.fromMe) return true // pesan dari akun bot sendiri
+  const ids = [m.key.participant, m.key.participantAlt, m.key.remoteJid, m.key.remoteJidAlt]
+  return ids.some((j) => j && ownerDigits.includes(j.split('@')[0].split(':')[0]))
+}
 
 function ask(q) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
@@ -58,16 +85,16 @@ async function toSticker(buffer, kind) {
     await writeFile(inp, buffer)
 
     const vf =
-      (kind === 'video' ? 'fps=15,' : '') +
+      (kind === 'video' ? 'fps=12,' : '') +
       'scale=512:512:force_original_aspect_ratio=decrease,format=rgba,' +
       'pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000'
 
     let result
-    for (const q of [60, 45, 30, 20, 10]) {
+    for (const q of [50, 35, 25, 15, 10]) {
       const args = ['-y', '-i', inp]
       if (kind === 'video') args.push('-t', String(MAX_SECONDS))
       args.push('-vf', vf, '-an', '-vcodec', 'libwebp', '-lossless', '0',
-        '-q:v', String(q), '-compression_level', '6', '-loop', '0', out)
+        '-q:v', String(q), '-compression_level', '3', '-loop', '0', out)
       await run('ffmpeg', args)
       result = await readFile(out)
       if (result.length <= MAX_STICKER_BYTES) return result
@@ -136,13 +163,17 @@ async function toOpus(buffer, maxSec) {
 }
 
 async function sendSoundSticker(sock, jid, videoBuf) {
-  const webp = await toSticker(videoBuf, 'video')
-  const { buf: ogg, seconds } = await toOpus(videoBuf, MAX_SECONDS)
+  // encode stiker & audio bersamaan, lalu upload keduanya bersamaan
+  const [webp, { buf: ogg, seconds }] = await Promise.all([
+    toSticker(videoBuf, 'video'),
+    toOpus(videoBuf, MAX_SECONDS),
+  ])
   const up = { upload: sock.waUploadToServer }
 
-  const { stickerMessage } = await prepareWAMessageMedia({ sticker: webp }, up)
-  const { audioMessage } = await prepareWAMessageMedia(
-    { audio: ogg, mimetype: 'audio/ogg; codecs=opus', seconds }, up)
+  const [{ stickerMessage }, { audioMessage }] = await Promise.all([
+    prepareWAMessageMedia({ sticker: webp }, up),
+    prepareWAMessageMedia({ audio: ogg, mimetype: 'audio/ogg; codecs=opus', seconds }, up),
+  ])
 
   const sBytes = proto.Message.StickerMessage.encode(
     proto.Message.StickerMessage.fromObject({ ...stickerMessage, isAnimated: true, width: 512, height: 512 })).finish()
@@ -201,6 +232,7 @@ ${PREFIX}s  → gambar/video jadi stiker
 ${PREFIX}sa → video jadi stiker BERSUARA (sound sticker, 1 pesan)
 ${PREFIX}sa2 → cadangan: stiker + audio dikirim terpisah
 ${PREFIX}mp3 → ambil audio dari video
+${PREFIX}public / ${PREFIX}private → (owner) semua orang boleh pakai / cuma owner
 
 Cara pakai: kirim gambar/video dengan caption perintah, atau reply gambar/video pakai perintahnya.
 Video maksimal ${MAX_SECONDS} detik buat stiker.
@@ -214,7 +246,19 @@ async function handle(sock, m) {
   const jid = m.key.remoteJid
   const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: m })
 
-  if (['menu', 'help', 'start'].includes(cmd)) return reply(MENU)
+  const owner = isOwnerMsg(m)
+
+  if (cmd === 'public' || cmd === 'private') {
+    if (!owner) return reply('Cuma owner yang bisa ganti mode.')
+    mode = cmd
+    saveMode()
+    return reply(mode === 'public' ? '🌐 Mode PUBLIC: semua orang bisa pakai bot.' : '🔒 Mode PRIVATE: cuma owner yang bisa pakai bot.')
+  }
+
+  // mode private: abaikan perintah dari orang lain
+  if (mode === 'private' && !owner) return
+
+  if (['menu', 'help', 'start'].includes(cmd)) return reply(`${MENU}\n\nMode: *${mode.toUpperCase()}*`)
 
   const isSticker = ['s', 'sticker', 'stiker'].includes(cmd)
   const isSoundSticker = ['sa', 'soundsticker'].includes(cmd)
